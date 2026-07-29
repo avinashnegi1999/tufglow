@@ -17,9 +17,10 @@ and effect, keep the hotkeys working, and get out of the way.** That's the whole
 scope. No fan curves, no performance profiles, no background daemon, no tray
 icon, no telemetry, nothing running when the window is closed.
 
-<!-- Add a screenshot: PrtSc the window, save as share/screenshot.png, then uncomment:
-![One window: preview, presets, brightness, effect, speed](share/screenshot.png)
--->
+<p align="center">
+  <img src="share/screenshot.png" width="420"
+       alt="The app window: colour preview with hex caption, a row of preset circles, then brightness, effect and speed rows.">
+</p>
 
 ---
 
