@@ -13,7 +13,7 @@ RGB keyboard becomes dead weight — stuck on whatever colour Windows left behin
 with no way to change it and Fn keys that do nothing.
 
 This is a single small GTK4 app that gives it back: **set the colour, brightness
-and effect, keep the hotkeys working, and get out of the way.** That's the whole
+and effect, and get out of the way.** That's the whole
 scope. No fan curves, no performance profiles, no background daemon, no tray
 icon, no telemetry, nothing running when the window is closed.
 
@@ -66,9 +66,8 @@ sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libnotify-bin
 | Desktop | GNOME Shell 50.1 (Wayland) |
 | Toolkit | GTK4 + libadwaita 1.9 |
 
-Other ASUS models with the same sysfs interface should work. Non-GNOME desktops
-work too — you just bind the hotkeys yourself (the installer says so and skips
-that step instead of failing).
+Other ASUS models with the same sysfs interface should work, and nothing here
+is GNOME-specific.
 
 ## Install
 
@@ -101,12 +100,11 @@ extra. On GNOME the shortcut is marked trusted, without which double-clicking a
 |---|---|---|
 | `~/.local/bin/kbdrgb-gui` | you | the app |
 | `~/.local/bin/kbdrgb` | you | one-shot CLI |
-| `~/.local/bin/kbdrgb-cycle` | you | effect stepper, called by the hotkeys |
+| `~/.local/bin/kbdrgb-cycle` | you | effect stepper, for scripts and your own keybinds |
 | `/usr/local/bin/kbdrgb-write` | **root** | the only privileged piece |
 | `/etc/sudoers.d/kbdrgb` | **root** | NOPASSWD for exactly that one binary |
 | `~/.local/share/applications/kbdrgb.desktop` | you | app-grid launcher |
 | `~/Desktop/kbdrgb.desktop` | you | *optional* — only if you say yes |
-| GNOME `custom-keybindings` | you | `Super+Alt+Left` / `Super+Alt+Right` |
 | `~/.local/state/kbdrgb/state` | you | last colour/effect (created on first run) |
 
 The installer rewrites the launcher's `Exec=` to the installed copy in
@@ -142,28 +140,18 @@ the next time.
        alt="The system colour dialog open over the app, showing the standard palette and a row of previously used custom colours.">
 </p>
 
-If a hotkey or an Fn key changes something while the window is open, the window
-follows along rather than going stale.
-
-### Hotkeys
-
-| Keys | Action |
-|---|---|
-| `Super+Alt+Right` | next effect |
-| `Super+Alt+Left` | previous effect |
-
-Each shows a desktop notification that replaces the previous one instead of
-stacking a banner per keypress.
+If something changes the lighting while the window is open, the window follows
+along rather than going stale.
 
 ### CLI
 
-For scripts, `.xprofile`, or a window-manager keybind:
+For scripts, `.xprofile`, or a keybind you set up yourself:
 
 ```sh
 kbdrgb 006a77                 # solid teal
 kbdrgb ff0066 breathe 1       # magenta, breathing, medium speed
 kbdrgb ffffff cycle           # rainbow (colour argument is ignored by the hardware)
-kbdrgb-cycle next             # step the effect forward
+kbdrgb-cycle next             # step the effect forward (bind this if you want)
 ```
 
 `kbdrgb HEX [static|breathe|cycle|strobe] [speed 0-2]`
@@ -171,8 +159,7 @@ kbdrgb-cycle next             # step the effect forward
 No password prompt: it hands off to the same `kbdrgb-write` helper the GUI uses
 rather than writing sysfs itself, so there's one copy of the validation and one
 place that decides when to persist. It also updates the state file, so a change
-made from the CLI shows up correctly in the GUI and the hotkeys instead of
-leaving them stale.
+made from the CLI shows up correctly in the GUI instead of leaving it stale.
 
 ## How it talks to the hardware
 
@@ -199,7 +186,7 @@ immediately and is volatile; `save=1` writes it to the keyboard controller's
 non-volatile store so it survives a reboot.
 
 **`save=1` has to be rate-limited, and that is not optional.** Sending one per
-colour change — which is what a preset click or a hotkey press produces — hangs
+colour change — which is what clicking through the presets produces — hangs
 the EC firmware and hard-locks the whole machine: no panic, no shutdown, the
 kernel log simply stops mid-line. It took this laptop down twice and left the
 NTFS partition it was being developed on damaged. `kbdrgb-write` therefore takes
@@ -243,11 +230,13 @@ under `$HOME` would hand root to anyone who can write there.
 a genuine lockout, so the installer validates a tempfile first and aborts
 without touching the system if it doesn't parse.
 
-**`Super+Alt+Left/Right`, not `Fn+Left/Right`.** On this laptop the Fn+arrow
-combinations never reach Linux at all — they're consumed in firmware and emit no
-keycode, which `tools/kbdrgb-probe` is how you establish. Super+Alt+arrow is
-unbound in stock GNOME, so it collides with neither window snapping
-(`Super+Left/Right`) nor workspace switching (`Ctrl+Alt+Left/Right`).
+**No hotkeys are installed.** An earlier version bound `Super+Alt+Left/Right`,
+because Fn+arrow never reaches Linux on this laptop at all — the combinations are
+consumed in firmware and emit no keycode, which `tools/kbdrgb-probe` is how you
+establish. But an installer taking over global shortcuts is a bigger imposition
+than it's worth for a window you open occasionally. `kbdrgb-cycle next` / `prev`
+is there if you want to bind it yourself, in your desktop's own settings, to
+whatever doesn't collide with your setup.
 
 **Two ceilings, both marked in the source rather than hidden.** Brightness is
 polled once a second because sysfs attributes don't support inotify (they use
@@ -262,7 +251,6 @@ hardware — a redundant write, not a wrong one.
 | `install.sh` stops at "asus-nb-wmi single-zone RGB present" | Driver isn't loaded or the model differs. Check `ls /sys/class/leds/`. Without `kbd_rgb_mode` there's nothing to drive. |
 | Colour won't change, window shows **Write failed** | The sudoers rule isn't active. Run `./install.sh --check`. |
 | A password prompt appears when changing colour | Same cause — `/etc/sudoers.d/kbdrgb` is missing or not `0440 root:root`. Re-run `./install.sh`. |
-| Hotkeys do nothing | Not a GNOME session, or the bindings didn't apply. Check: `gsettings get org.gnome.settings-daemon.plugins.media-keys custom-keybindings` — it should list two `kbdrgb-*` paths. |
 | Brightness slider does nothing | Not in an active seat session. Verify with `loginctl` that your session is `active`. |
 | Effect resets after reboot | Expected for the *effect*; the colour persists via `save=1` on close. The state file restores the rest on next launch. |
 | Launcher missing from the app grid | `update-desktop-database ~/.local/share/applications`, then log out and back in. |
@@ -291,9 +279,10 @@ runs it as its last step.
 ./uninstall.sh --purge   # removes that too
 ```
 
-Closes the app if it's open, then reverses the sudoers rule, the GNOME hotkeys
-and the Desktop shortcut as well as the files — the pieces a plain `rm` would
-leave behind. The keyboard keeps whatever colour was last set until reboot.
+Closes the app if it's open, then reverses the sudoers rule and the Desktop
+shortcut as well as the files — the pieces a plain `rm` would leave behind. It
+also clears the `Super+Alt` keybindings if you installed a version old enough to
+have set them. The keyboard keeps whatever colour was last set until reboot.
 
 ## Limitations
 
@@ -302,21 +291,19 @@ leave behind. The keyboard keeps whatever colour was last set until reboot.
 - **Lighting only.** No fan curves, no performance profiles, no Aura sync. Those
   are what [asusctl](https://gitlab.com/asus-linux/asusctl) is for — this exists
   for machines where asusctl is more than you want to install.
-- **GNOME for the hotkey step.** Everything else is desktop-agnostic; on other
-  desktops bind `kbdrgb-cycle next` / `prev` yourself.
 - **Effect can't be read from hardware,** so if you change it with some other
-  tool the state file goes stale and the arrows resume from the wrong place.
+  tool the state file goes stale and `kbdrgb-cycle` resumes from the wrong place.
 
 ## Layout
 
 ```
 .
 ├── install.sh              # idempotent installer; --check verifies without changing
-├── uninstall.sh            # reverses sudoers + hotkeys too, not just files
+├── uninstall.sh            # reverses the sudoers rule too, not just files
 ├── bin/
 │   ├── kbdrgb-gui          # the GTK4/libadwaita app; --selftest
 │   ├── kbdrgb              # one-shot CLI
-│   └── kbdrgb-cycle        # effect stepper the hotkeys call
+│   └── kbdrgb-cycle        # effect stepper, for your own keybinds
 ├── root/
 │   ├── kbdrgb-write        # the only privileged code: validates, writes sysfs
 │   └── kbdrgb.sudoers      # NOPASSWD rule for exactly that binary

@@ -1,6 +1,8 @@
 #!/bin/bash
 # Removes everything install.sh created — including the sudoers rule and the
-# GNOME hotkeys, which are the two pieces a plain `rm` would leave behind.
+# GNOME hotkeys, which are the pieces a plain `rm` would leave behind. Current
+# versions never bind hotkeys; the removal stays for installs old enough to have
+# had them set.
 # Leaves your saved colour in ~/.local/state/kbdrgb unless you pass --purge.
 set -euo pipefail
 

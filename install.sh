@@ -16,15 +16,12 @@
 #   /usr/local/bin/kbdrgb-write                     root-owned sysfs writer
 #   /etc/sudoers.d/kbdrgb                           NOPASSWD for that one file
 #   ~/.local/share/applications/kbdrgb.desktop      app launcher
-#   GNOME custom keybindings                        Super+Alt+Left/Right
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LED=/sys/class/leds/asus::kbd_backlight
 BIN="$HOME/.local/bin"
 APPS="$HOME/.local/share/applications"
-KEYPATH=/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings
-MEDIA=org.gnome.settings-daemon.plugins.media-keys
 
 ok()   { printf '  \033[32m✓\033[0m %s\n'  "$1"; }
 bad()  { printf '  \033[31m✗\033[0m %s\n'  "$1"; }
@@ -83,8 +80,6 @@ if [[ ${1:-} == --check ]]; then
   sudo -n /usr/local/bin/kbdrgb-write 0 106 119 >/dev/null 2>&1 \
     && ok "passwordless helper rule works" || bad "sudoers rule not working"
   [[ -f $APPS/kbdrgb.desktop ]] && ok "launcher installed" || bad "launcher missing"
-  gsettings get $MEDIA custom-keybindings | grep -q kbdrgb \
-    && ok "hotkeys bound" || bad "hotkeys not bound"
   "$BIN/kbdrgb-gui" --selftest
   exit 0
 fi
@@ -135,37 +130,6 @@ else
   exit 1
 fi
 
-# ----------------------------------------------------------------- hotkeys
-# Super+Alt+Left/Right: unbound in stock GNOME, so no clash with window
-# snapping (Super+Left/Right) or workspace switching (Ctrl+Alt+Left/Right).
-# Fn+arrow is deliberately NOT used — on this laptop it never reaches Linux.
-step "Binding hotkeys"
-bind_key() { # name command binding slug
-  local path="$KEYPATH/$4/"
-  python3 - "$path" <<'PY'
-import ast, subprocess, sys   # literal_eval, not eval: never exec whatever gsettings hands back
-path, = sys.argv[1:]
-cur = subprocess.run(["gsettings", "get", "org.gnome.settings-daemon.plugins.media-keys",
-                      "custom-keybindings"], capture_output=True, text=True).stdout.strip()
-paths = [] if cur in ("@as []", "[]") else ast.literal_eval(cur)
-if path not in paths:                       # idempotent: never duplicate an entry
-    paths.append(path)
-    subprocess.run(["gsettings", "set", "org.gnome.settings-daemon.plugins.media-keys",
-                    "custom-keybindings", str(paths)], check=True)
-PY
-  local schema="$MEDIA.custom-keybinding:$path"
-  gsettings set "$schema" name    "$1"
-  gsettings set "$schema" command "$2"
-  gsettings set "$schema" binding "$3"
-  ok "$3  ->  $1"
-}
-if command -v gsettings >/dev/null && [[ -n ${XDG_CURRENT_DESKTOP:-} ]]; then
-  bind_key "Keyboard lighting: next effect" "$BIN/kbdrgb-cycle next" '<Super><Alt>Right' kbdrgb-next
-  bind_key "Keyboard lighting: prev effect" "$BIN/kbdrgb-cycle prev" '<Super><Alt>Left'  kbdrgb-prev
-else
-  bad "not a GNOME session — skipped hotkeys (bind $BIN/kbdrgb-cycle next/prev by hand)"
-fi
-
 # ----------------------------------------------------------------- verify
 step "Verifying"
 sudo -n /usr/local/bin/kbdrgb-write 0 106 119 0 0 \
@@ -174,7 +138,7 @@ sudo -n /usr/local/bin/kbdrgb-write 0 106 119 0 0 \
 "$BIN/kbdrgb-gui" --selftest
 
 printf '\n\033[1mDone.\033[0m Find it in the app grid as "Keyboard Lighting", or run: kbdrgb-gui\n'
-printf 'Effects also step with Super+Alt+Left / Super+Alt+Right.\n'
+printf 'Step effects from a terminal with: kbdrgb-cycle next\n'
 [[ ":$PATH:" == *":$BIN:"* ]] || printf '\nNote: %s is not on your PATH.\n' "$BIN"
 
 # --- open it, so a fresh install ends with the thing you installed on screen
