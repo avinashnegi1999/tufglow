@@ -1,4 +1,4 @@
-# Keyboard Lighting
+# TUFGlow — Keyboard RGB for ASUS TUF laptops on Linux
 
 **An Armoury Crate replacement for the one thing it was actually needed for: the keyboard backlight.**
 
