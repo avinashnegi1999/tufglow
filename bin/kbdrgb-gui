@@ -1,0 +1,409 @@
+#!/usr/bin/env python3
+"""Single-window keyboard backlight control for ASUS TUF single-zone RGB.
+
+Everything lives on one page: preview/picker, preset swatches, brightness,
+effect, speed. Changes apply live — no Apply button, no wizard.
+
+Colour/effect writes go through /usr/local/bin/kbdrgb-write, which the
+sudoers.d/kbdrgb rule lets us run without a password. Brightness needs no
+helper at all: logind's SetBrightness writes the LED for the active session.
+"""
+import os
+import subprocess
+from pathlib import Path
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
+
+HELPER = "/usr/local/bin/kbdrgb-write"
+LED = "asus::kbd_backlight"
+LED_DIR = Path("/sys/class/leds") / LED
+# Shared with kbdrgb-cycle (the Fn-key hotkey): "mode speed r g b".
+# sysfs kbd_rgb_mode is write-only, so this file is the only record of what's set.
+STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "kbdrgb/state"
+MODES = ["Static", "Breathing", "Rainbow cycle", "Strobe"]
+SPEEDS = ["Slow", "Medium", "Fast"]
+RAINBOW = 2  # mode index that drives its own hues — colour input is ignored
+
+PRESETS = [
+    ("Teal", "#006a77"),
+    ("Ice", "#3fd0e0"),
+    ("Violet", "#7a3cff"),
+    ("Magenta", "#ff0066"),
+    ("Amber", "#ff8a00"),
+    ("Azure", "#1c71d8"),
+    ("White", "#ffffff"),
+]
+# Only meaningful at max_brightness 3 (TUF single-zone); anything else falls back to "n / max".
+BRIGHT_NAMES = ["Off", "Low", "Medium", "Max"]
+
+
+class Window(Adw.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title="Keyboard Lighting",
+                         default_width=440, resizable=False)  # sizes to content; no stray maximise
+        self.rgb, self.mode, self.speed = self.load_state()
+        self._pending = None  # debounce handle
+        self._bus = None      # lazy system-bus handle for brightness
+        self.brightness = self._read_brightness()
+
+        # Persist on the way out, so what's on screen is what comes back after a
+        # reboot without saving to the EC on every single change.
+        self.connect("close-request", self.on_close)
+
+        # Escape closes — it reads as a dialog, so it should behave like one.
+        keys = Gtk.ShortcutController()
+        keys.add_shortcut(Gtk.Shortcut(
+            trigger=Gtk.ShortcutTrigger.parse_string("Escape"),
+            action=Gtk.CallbackAction.new(lambda *_: (self.close(), True)[1])))
+        self.add_controller(keys)
+
+        self.css = Gtk.CssProvider()
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), self.css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        page = Adw.PreferencesPage()
+        toolbar = Adw.ToolbarView()
+        toolbar.add_top_bar(Adw.HeaderBar())
+        toolbar.set_content(page)
+        self.set_content(toolbar)
+
+        # --- preview strip doubles as the colour picker: click the thing you're editing
+        self.preview = Gtk.Box(height_request=72)
+        self.preview.add_css_class("kbd-preview")
+        self.pick_btn = Gtk.Button(child=self.preview, tooltip_text="Choose a custom colour")
+        self.pick_btn.add_css_class("picker")
+        self.pick_btn.connect("clicked", self.on_pick)
+        self.caption = Gtk.Label(halign=Gtk.Align.CENTER)
+        self.caption.add_css_class("dim-label")
+        self.caption.add_css_class("caption")
+        prev_group = Adw.PreferencesGroup()
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.append(self.pick_btn)
+        box.append(self.caption)
+        prev_group.add(box)
+        page.add(prev_group)
+
+        # --- presets: one click for the colours actually used
+        sw_group = Adw.PreferencesGroup(title="Presets")
+        swatches = Gtk.Box(spacing=8, halign=Gtk.Align.CENTER, margin_top=4, margin_bottom=4)
+        self.swatch_btns = []
+        for i, (name, hexcode) in enumerate(PRESETS):
+            b = Gtk.Button(tooltip_text=name, width_request=44, height_request=44)
+            b.add_css_class("swatch")
+            b.add_css_class(f"swatch{i}")
+            b.connect("clicked", self.on_preset, hexcode)
+            swatches.append(b)
+            self.swatch_btns.append(b)
+        sw_group.add(swatches)
+        page.add(sw_group)
+
+        # --- brightness + effect + speed
+        cfg = Adw.PreferencesGroup(title="Brightness and Effect")  # titles parse markup: no bare &
+
+        # max_brightness is 3 on TUF single-zone, but read it rather than assume.
+        self.bright_scale = Gtk.Scale.new_with_range(
+            Gtk.Orientation.HORIZONTAL, 0, self._max_brightness(), 1)
+        self.bright_scale.set_hexpand(True)
+        self.bright_scale.set_draw_value(False)
+        self.bright_scale.set_round_digits(0)
+        for i in range(self._max_brightness() + 1):
+            self.bright_scale.add_mark(i, Gtk.PositionType.BOTTOM, None)
+        self.bright_scale.set_value(self.brightness)
+        self.bright_scale.connect("value-changed", self.on_brightness)
+        self.bright_row = Adw.ActionRow(title="Brightness")
+        self.bright_row.add_suffix(self.bright_scale)
+        cfg.add(self.bright_row)
+
+        self.mode_row = Adw.ComboRow(title="Effect", model=Gtk.StringList.new(MODES))
+        self.mode_row.set_selected(self.mode)  # set before connect: no spurious write
+        self.mode_row.connect("notify::selected", self.on_mode)
+        cfg.add(self.mode_row)
+
+        self.speed_row = Adw.ComboRow(title="Speed", model=Gtk.StringList.new(SPEEDS))
+        self.speed_row.set_selected(self.speed)
+        self.speed_row.connect("notify::selected", self.on_speed)
+        cfg.add(self.speed_row)
+        page.add(cfg)
+
+        self.status = Gtk.Label(halign=Gtk.Align.CENTER, wrap=True)
+        self.status.add_css_class("caption")
+        note = Adw.PreferencesGroup()
+        note.add(self.status)
+        page.add(note)
+
+        self.refresh()
+        self.apply(now=True)
+        self.watch_external()
+
+    # ---------- stay in sync with the Fn hotkeys (kbdrgb-cycle) and Fn brightness keys
+
+    def watch_external(self):
+        """Without this the window silently goes stale the moment a hotkey fires."""
+        # Effect/colour: kbdrgb-cycle writes the state file, so watch it. Real file -> inotify works.
+        try:
+            self._mon = Gio.File.new_for_path(str(STATE)).monitor_file(
+                Gio.FileMonitorFlags.NONE, None)
+            self._mon.connect("changed", lambda *_: self.pull_state())
+        except GLib.Error:
+            self._mon = None  # ! non-fatal: only costs live sync, not function
+        # Brightness: sysfs attrs don't do inotify (poll()/sysfs_notify only), so tick instead.
+        # ponytail: 1s poll of a 1-byte file; switch to a GSource on brightness_hw_changed
+        # if this ever shows up in a profile.
+        GLib.timeout_add_seconds(1, self.pull_brightness)
+
+    def pull_state(self):
+        rgb, mode, speed = self.load_state()
+        if (rgb, mode, speed) == (self.rgb, self.mode, self.speed):
+            return  # our own save_state echoing back
+        self.rgb, self.mode, self.speed = rgb, mode, speed
+        # set_selected on an unchanged value is a no-op, so this can't loop back into a write
+        self.mode_row.set_selected(mode)
+        self.speed_row.set_selected(speed)
+        self.refresh()
+
+    def pull_brightness(self):
+        live = self._read_brightness()
+        if live != self.brightness:      # Fn key or another tool moved it
+            self.brightness = live
+            self.bright_scale.set_value(live)  # on_brightness re-sends the same value: harmless
+            self.refresh()
+        return GLib.SOURCE_CONTINUE
+
+    # ---------- shared state (see kbdrgb-cycle)
+
+    @staticmethod
+    def load_state():
+        try:
+            m, s, r, g, b = (int(x) for x in STATE.read_text().split()[:5])
+            if 0 <= m <= 3 and 0 <= s <= 2 and all(0 <= c <= 255 for c in (r, g, b)):
+                return (r, g, b), m, s
+        except (OSError, ValueError):
+            pass
+        return (0x00, 0x6A, 0x77), 0, 0
+
+    def save_state(self):
+        try:
+            STATE.parent.mkdir(parents=True, exist_ok=True)
+            STATE.write_text("%d %d %d %d %d\n" % ((self.mode, self.speed) + self.rgb))
+        except OSError:
+            pass  # ! non-fatal: losing state only costs the hotkey its starting point
+
+    # ---------- brightness (logind, no root: separate sysfs attr from kbd_rgb_mode)
+
+    @staticmethod
+    def _read_int(name, default):
+        try:
+            return int((LED_DIR / name).read_text().strip())
+        except (OSError, ValueError):
+            return default
+
+    def _max_brightness(self):
+        return max(1, self._read_int("max_brightness", 3))
+
+    def _read_brightness(self):
+        return self._read_int("brightness", self._max_brightness())
+
+    def _bright_label(self, v):
+        mx = self._max_brightness()
+        return BRIGHT_NAMES[v] if mx == len(BRIGHT_NAMES) - 1 else f"{v} / {mx}"
+
+    def set_brightness(self, level):
+        """org.freedesktop.login1.Session.SetBrightness — polkit allows the active session."""
+        try:
+            if self._bus is None:
+                self._bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+            self._bus.call_sync("org.freedesktop.login1",
+                                "/org/freedesktop/login1/session/auto",  # 'self' fails outside the session
+                                "org.freedesktop.login1.Session", "SetBrightness",
+                                GLib.Variant("(ssu)", ("leds", LED, level)),
+                                None, Gio.DBusCallFlags.NONE, 2000, None)
+            self.status.set_text("")
+        except GLib.Error as e:
+            self.status.set_text(f"Brightness failed: {e.message}")
+
+    # ---------- helpers
+
+    def _hex(self):
+        return "#%02x%02x%02x" % self.rgb
+
+    def _as_rgba(self):
+        c = Gdk.RGBA()
+        c.parse(self._hex())
+        return c
+
+    def refresh(self):
+        """Repaint preview + swatch CSS and enable/disable rows for the mode."""
+        rainbow = self.mode == RAINBOW
+        off = self.brightness == 0
+        fill = ("linear-gradient(to right, #ff0040, #ff8a00, #ffe000, "
+                "#38d430, #00b7d4, #4b4bff, #b13cff)") if rainbow else self._hex()
+
+        rules = [
+            ".kbd-preview {"
+            f" background: {fill};"
+            " border-radius: 12px;"
+            # At brightness 0 the keyboard is dark — a glowing preview would be a lie.
+            f" opacity: {0.25 if off else 1.0};"
+            " box-shadow: 0 0 28px 2px alpha(%s, 0.55) inset, 0 2px 6px alpha(#000,0.3);"
+            " }" % ("#888888" if rainbow else self._hex()),
+            ".picker { padding: 0; background: none; box-shadow: none; border: none; }",
+            ".swatch { border-radius: 22px; box-shadow: 0 1px 4px alpha(#000,0.35); }",
+            ".swatch.selected { outline: 3px solid @accent_bg_color; outline-offset: 3px; }",
+        ]
+        for i, (_, hexcode) in enumerate(PRESETS):
+            rules.append(f".swatch{i} {{ background: {hexcode}; }}")
+        self.css.load_from_string("\n".join(rules))
+
+        # Ring the preset that matches the live colour — otherwise the row looks decorative.
+        for i, (_, hexcode) in enumerate(PRESETS):
+            hit = not rainbow and hexcode.lower() == self._hex()
+            self.swatch_btns[i].set_css_classes(
+                ["swatch", f"swatch{i}"] + (["selected"] if hit else []))
+
+        # Colour is meaningless in rainbow; speed is meaningless in static.
+        self.pick_btn.set_sensitive(not rainbow)
+        self.speed_row.set_sensitive(self.mode != 0)
+        self.bright_row.set_subtitle(self._bright_label(self.brightness))
+
+        if off:
+            self.caption.set_text("Backlight off")
+            return
+        if rainbow:
+            self.caption.set_text("Cycles through hues — colour is ignored")
+        elif self.mode == 0:
+            self.caption.set_text(f"Solid {self._hex()}")
+        else:
+            self.caption.set_text(f"{MODES[self.mode]} {self._hex()} · {SPEEDS[self.speed]}")
+
+    def apply(self, now=False):
+        """Debounced write — dragging the colour wheel shouldn't spam sysfs."""
+        if self._pending:
+            GLib.source_remove(self._pending)
+            self._pending = None
+        if now:
+            self._write()
+        else:
+            self._pending = GLib.timeout_add(120, self._write)
+
+    def _write(self, save=False):
+        self._pending = None
+        r, g, b = self.rgb
+        # save=True -> helper persists to the EC now. Only on quit: doing it per
+        # change is what crashed the machine (see the comment in kbdrgb-write).
+        cmd = ["sudo", "-n", HELPER, *(["--save"] if save else []),
+               str(r), str(g), str(b), str(self.mode), str(self.speed)]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, timeout=5)
+            self.save_state()
+            self.status.set_text("")
+        except subprocess.CalledProcessError as e:
+            self.status.set_text(f"Write failed: {e.stderr.decode().strip() or e}")
+        except (OSError, subprocess.TimeoutExpired) as e:
+            self.status.set_text(f"Cannot reach {HELPER}: {e}")
+        return GLib.SOURCE_REMOVE
+
+    # ---------- handlers
+
+    def on_close(self, *_):
+        if self._pending:                 # a debounced change never made it out
+            GLib.source_remove(self._pending)
+        self._write(save=True)
+        return False                      # let the close proceed
+
+    def on_preset(self, _btn, hexcode):
+        self.rgb = tuple(int(hexcode[i:i + 2], 16) for i in (1, 3, 5))
+        if self.mode == RAINBOW:          # picking a colour means leaving rainbow
+            self.mode_row.set_selected(0)  # triggers on_mode -> refresh + apply
+        self.refresh()
+        self.apply()
+
+    def on_pick(self, _btn):
+        Gtk.ColorDialog(with_alpha=False).choose_rgba(self, self._as_rgba(), None, self.on_picked)
+
+    def on_picked(self, dialog, result):
+        try:
+            c = dialog.choose_rgba_finish(result)
+        except GLib.Error:
+            return  # dismissed
+        if c is None:
+            return
+        self.rgb = (round(c.red * 255), round(c.green * 255), round(c.blue * 255))
+        self.refresh()
+        self.apply()
+
+    def on_brightness(self, scale):
+        self.brightness = int(round(scale.get_value()))
+        self.set_brightness(self.brightness)
+        self.refresh()
+
+    def on_mode(self, row, _p):
+        self.mode = row.get_selected()
+        self.refresh()
+        self.apply(now=True)
+
+    def on_speed(self, row, _p):
+        self.speed = row.get_selected()
+        self.refresh()
+        self.apply(now=True)
+
+
+class App(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id="local.kbdrgb")
+
+    def do_activate(self):
+        Window(self).present()
+
+
+def selftest():
+    """kbdrgb-gui --selftest — the smallest thing that fails if the plumbing breaks.
+
+    Exercises the two paths with no UI: brightness (logind -> sysfs, verified by
+    reading it back) and state-file round-tripping (shared with kbdrgb-cycle).
+    Restores whatever it found. No display needed.
+    """
+    class Headless(Window):          # skip __init__: no GTK widgets, no window
+        def __init__(self):
+            self._bus = None
+            self.status = type("S", (), {"set_text": lambda s, t: None})()
+
+    w = Headless()
+    mx, start = w._max_brightness(), w._read_brightness()
+    assert mx >= 1, f"max_brightness {mx}"
+    assert 0 <= start <= mx, f"brightness {start} out of 0..{mx}"
+
+    for want in (0, 1, mx):
+        w.set_brightness(want)
+        GLib.usleep(200_000)
+        got = w._read_brightness()
+        assert got == want, f"set brightness {want}, sysfs reads {got}"
+    w.set_brightness(start)
+
+    assert w._bright_label(0) == ("Off" if mx == 3 else f"0 / {mx}")
+
+    # State must survive a write/read cycle in the 5-field format kbdrgb-cycle parses.
+    saved = STATE.read_text() if STATE.exists() else None
+    try:
+        w.rgb, w.mode, w.speed = (1, 2, 3), 1, 2
+        w.save_state()
+        assert len(STATE.read_text().split()) == 5, "kbdrgb-cycle needs exactly 5 fields"
+        assert Window.load_state() == ((1, 2, 3), 1, 2), STATE.read_text()
+        STATE.write_text("garbage\n")
+        assert Window.load_state() == ((0x00, 0x6A, 0x77), 0, 0), "corrupt state must fall back"
+    finally:
+        if saved is not None:
+            STATE.write_text(saved)
+
+    print(f"selftest ok — max_brightness={mx}, brightness restored to {start}")
+
+
+if __name__ == "__main__":
+    import sys
+    if "--selftest" in sys.argv:
+        selftest()
+        sys.exit(0)
+    sys.exit(App().run(sys.argv))

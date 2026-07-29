@@ -1,0 +1,39 @@
+#!/bin/sh
+# Guards the fix for the 2026-07-30 hard crashes.
+#
+# kbd_rgb_mode cmd=1 writes the EC's non-volatile store. Sending one per click
+# hard-locked the whole laptop twice (and took the NTFS Data volume dirty with
+# it). kbdrgb-write now rate-limits that write; this fails if that ever regresses.
+#
+# Reads the stamp file kbdrgb-write keeps — the only observable record, since
+# kbd_rgb_mode is write-only and the EC can't be queried.
+#
+# Usage: tools/test-persist-ratelimit        (needs the helper installed)
+set -e
+HELPER=/usr/local/bin/kbdrgb-write
+STAMP=/run/kbdrgb.persisted
+[ -x "$HELPER" ] || { echo "SKIP: $HELPER not installed — run ./install.sh" >&2; exit 0; }
+
+stamp() { cat "$STAMP" 2>/dev/null || echo "none"; }
+fail()  { echo "FAIL: $1" >&2; exit 1; }
+
+original=$(stamp)
+restore() { [ "$original" = none ] || sudo -n "$HELPER" --save 0 106 119 0 0 >/dev/null 2>&1 || true; }
+trap restore EXIT
+
+sudo -n "$HELPER" --save 10 20 30 0 0 >/dev/null   # seed a known persisted value
+seeded=$(stamp)
+[ "$seeded" != "$original" ] || fail "--save on a changed colour did not persist"
+
+# A burst like the one in the crash logs: 8 writes inside a couple of seconds.
+for c in 255:138:0 255:0:102 255:255:255 122:60:255 63:208:224 20:200:90 224:27:36 0:255:128; do
+  r=${c%%:*}; rest=${c#*:}; g=${rest%%:*}; b=${rest##*:}
+  sudo -n "$HELPER" "$r" "$g" "$b" 0 0 || fail "helper rejected $r $g $b"
+done
+[ "$(stamp)" = "$seeded" ] || fail "burst reached the EC's non-volatile store — rate limit is broken"
+
+# --save with no actual change must stay a no-op.
+sudo -n "$HELPER" --save 10 20 30 0 0 >/dev/null
+[ "$(stamp)" = "$seeded" ] || fail "--save re-persisted an unchanged value"
+
+echo "ok — 8-write burst caused 0 EC persists; --save persists only on change"

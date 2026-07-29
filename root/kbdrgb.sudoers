@@ -1,0 +1,13 @@
+# Installed to /etc/sudoers.d/kbdrgb (0440 root:root) by install.sh.
+#
+# Why this exists: kbd_rgb_mode is a root-only sysfs attribute, so the colour
+# picker cannot write it directly. Rather than run the whole GUI as root, only
+# the tiny validating helper gets a password-free rule.
+#
+# Safe because kbdrgb-write lives in root-owned /usr/local/bin (unwritable by
+# the user) and validates every argument before touching sysfs. Never point
+# this rule at anything under $HOME — the user could rewrite it and own root.
+#
+# install.sh substitutes the real username for @USER@ and runs `visudo -c`
+# before putting the file in place.
+@USER@ ALL=(root) NOPASSWD: /usr/local/bin/kbdrgb-write

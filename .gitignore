@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+
+# corrupt .git from the 2026-07-30 crash; delete once the drive can unmount
+.git-broken/

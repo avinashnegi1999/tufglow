@@ -1,0 +1,39 @@
+#!/bin/sh
+# Step the keyboard lighting effect forward/back, Armoury-Crate style.
+# Usage: kbdrgb-cycle [next|prev]        (bind to Fn+Right / Fn+Left)
+#
+# kbd_rgb_mode is write-only, so the current effect can't be read back from
+# sysfs — it lives in the state file below, shared with kbdrgb-gui.
+set -e
+
+STATE=${XDG_STATE_HOME:-$HOME/.local/state}/kbdrgb/state
+mkdir -p "$(dirname "$STATE")"
+[ -f "$STATE" ] || echo "0 0 0 106 119" > "$STATE"
+
+# state line: mode speed r g b
+read -r m s r g b < "$STATE" || true
+case "$m$s$r$g$b" in
+  ''|*[!0-9\ ]*) m=0; s=0; r=0; g=106; b=119 ;;   # corrupt file -> defaults
+esac
+: "${s:=0}" "${r:=0}" "${g:=106}" "${b:=119}"
+
+case ${1:-next} in
+  next) m=$(( (m + 1) % 4 )) ;;
+  prev) m=$(( (m + 3) % 4 )) ;;
+  *) echo "usage: kbdrgb-cycle [next|prev]" >&2; exit 1 ;;
+esac
+
+case $m in
+  0) name="Static" ;;
+  1) name="Breathing" ;;
+  2) name="Rainbow cycle" ;;
+  3) name="Strobe" ;;
+esac
+
+printf '%s %s %s %s %s\n' "$m" "$s" "$r" "$g" "$b" > "$STATE"
+sudo -n /usr/local/bin/kbdrgb-write "$r" "$g" "$b" "$m" "$s"
+
+# Replace-in-place OSD instead of stacking one banner per keypress.
+notify-send -a "Keyboard Lighting" -i input-keyboard -t 1500 \
+  -h "string:x-canonical-private-synchronous:kbdrgb" \
+  "Keyboard: $name" 2>/dev/null || true

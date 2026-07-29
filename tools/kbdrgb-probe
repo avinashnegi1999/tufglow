@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+"""Report raw keycodes from the built-in keyboard + Asus WMI hotkey devices.
+
+Used to find out what a given Fn combo actually emits (if anything).
+Needs root to read /dev/input. Usage: sudo kbdrgb-probe [seconds]
+"""
+import os
+import select
+import struct
+import sys
+
+EV_KEY = 0x01
+FMT = "llHHi"          # input_event on 64-bit: timeval, type, code, value
+SIZE = struct.calcsize(FMT)
+DEVS = {"/dev/input/event3": "builtin-kbd", "/dev/input/event9": "asus-wmi-hotkeys"}
+
+NAMES = {102: "HOME", 107: "END", 103: "UP", 108: "DOWN", 105: "LEFT", 106: "RIGHT",
+         104: "PAGEUP", 109: "PAGEDOWN", 229: "KBDILLUMDOWN", 230: "KBDILLUMUP"}
+
+secs = float(sys.argv[1]) if len(sys.argv) > 1 else 25.0
+fds = {}
+for path, label in DEVS.items():
+    try:
+        fds[os.open(path, os.O_RDONLY | os.O_NONBLOCK)] = label
+    except OSError as e:
+        print(f"skip {path}: {e}", flush=True)
+
+print(f"listening {secs:.0f}s — press the combos now", flush=True)
+deadline = select.select  # keep flake8 quiet about unused import styles
+import time  # noqa: E402
+
+end = time.monotonic() + secs
+while time.monotonic() < end:
+    ready, _, _ = select.select(list(fds), [], [], 0.5)
+    for fd in ready:
+        try:
+            data = os.read(fd, SIZE * 64)
+        except OSError:
+            continue
+        for off in range(0, len(data) - SIZE + 1, SIZE):
+            _, _, etype, code, value = struct.unpack(FMT, data[off:off + SIZE])
+            if etype == EV_KEY and value == 1:  # key down only
+                print(f"  {fds[fd]:<18} code={code} {NAMES.get(code, '')}", flush=True)
+print("done", flush=True)

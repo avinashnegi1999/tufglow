@@ -1,0 +1,46 @@
+#!/bin/sh
+# Root half of the keyboard-colour picker: validate args, write asus-nb-wmi sysfs.
+# Usage: kbdrgb-write [--save] R G B [mode 0-3] [speed 0-2]      (decimal 0-255)
+# Lives in /usr/local/bin (root-owned) so the NOPASSWD sudoers rule is safe.
+set -e
+LED=/sys/devices/platform/asus-nb-wmi/leds/asus::kbd_backlight/kbd_rgb_mode
+LOCK=/run/kbdrgb.lock
+STAMP=/run/kbdrgb.persisted        # "<epoch>|<value>" of the last cmd=1 write
+PERSIST_EVERY=10                   # seconds; minimum gap between EC saves
+
+# --save forces the persist write (GUI uses it on quit, so the final colour sticks)
+force=0
+[ "$1" = "--save" ] && { force=1; shift; }
+
+# ! validate every arg: this runs as root from a NOPASSWD rule
+for v in "$1" "$2" "$3"; do
+  case $v in ''|*[!0-9]*) echo "bad channel: $v" >&2; exit 1 ;; esac
+  [ "$v" -le 255 ] || { echo "channel >255: $v" >&2; exit 1; }
+done
+m=${4:-0}; s=${5:-0}
+case $m in [0-3]) ;; *) echo "bad mode: $m" >&2; exit 1 ;; esac
+case $s in [0-2]) ;; *) echo "bad speed: $s" >&2; exit 1 ;; esac
+
+# ! serialise: two of these overlapping put a second WMI call into the EC while
+# ! the first is still running. Presets and hotkeys can fire that fast.
+exec 9>"$LOCK"
+flock 9
+
+# cmd=0 -> apply now, volatile. Cheap, safe to spam.
+echo "0 $m $1 $2 $3 $s" > "$LED"
+
+# ! cmd=1 writes the EC's NON-VOLATILE store. Sending it on every click is what
+# ! hard-locked the machine twice on 2026-07-30 (both crash logs end mid-burst of
+# ! kbdrgb-write, and took the NTFS Data volume dirty with them). Colour still
+# ! applies instantly above; this only decides what survives a reboot, so it can
+# ! be rate-limited hard. It also spares the EEPROM its write-cycle budget.
+want="$m $1 $2 $3 $s"
+now=$(date +%s)
+last_t=0; last=""
+[ -f "$STAMP" ] && IFS='|' read -r last_t last < "$STAMP" || true
+case $last_t in ''|*[!0-9]*) last_t=0 ;; esac
+
+if [ "$want" != "$last" ] && { [ "$force" = 1 ] || [ $((now - last_t)) -ge "$PERSIST_EVERY" ]; }; then
+  echo "1 $m $1 $2 $3 $s" > "$LED"
+  printf '%s|%s\n' "$now" "$want" > "$STAMP"
+fi

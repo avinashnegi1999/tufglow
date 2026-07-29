@@ -1,0 +1,38 @@
+#!/bin/sh
+# One-shot CLI for the ASUS TUF single-zone keyboard RGB.
+# Usage: kbdrgb RRGGBB [static|breathe|cycle|strobe] [speed 0-2]
+#
+# Translates hex + names into the numbers kbdrgb-write wants, then hands off.
+# It does NOT write sysfs itself: the helper already validates its arguments and
+# does the save=0/save=1 pair (apply now + persist), and it's the only thing the
+# NOPASSWD rule covers — so going through it means no password prompt and no
+# second copy of the same logic to keep in sync.
+set -e
+HELPER=/usr/local/bin/kbdrgb-write
+STATE=${XDG_STATE_HOME:-$HOME/.local/state}/kbdrgb/state
+
+hex=${1:?usage: kbdrgb RRGGBB [static|breathe|cycle|strobe] [0-2]}
+hex=${hex#\#}
+case $hex in [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) ;;
+  *) echo "bad hex: $hex" >&2; exit 1 ;; esac
+
+r=$((0x${hex%????})); g=$((0x$(echo "$hex" | cut -c3-4))); b=$((0x${hex#????}))
+
+case ${2:-static} in
+  static)  m=0 ;;
+  breathe) m=1 ;;
+  cycle)   m=2 ;;
+  strobe)  m=3 ;;
+  *) echo "bad mode: $2" >&2; exit 1 ;;
+esac
+s=${3:-0}
+case $s in [0-2]) ;; *) echo "bad speed: $s" >&2; exit 1 ;; esac
+
+[ -x "$HELPER" ] || { echo "$HELPER missing — run install.sh" >&2; exit 1; }
+sudo -n "$HELPER" "$r" "$g" "$b" "$m" "$s"
+
+# Keep the GUI and the hotkeys in step: kbd_rgb_mode is write-only, so this file
+# is the only record of what's set. Skipping it would leave them showing stale
+# values after a CLI change.
+mkdir -p "$(dirname "$STATE")"
+printf '%s %s %s %s %s\n' "$m" "$s" "$r" "$g" "$b" > "$STATE"
