@@ -133,6 +133,15 @@ button, no tabs, no wizard.
 | **Speed** | Greys out under Static. Colour greys out under Rainbow cycle. Neither means anything there, so neither pretends to. |
 | **Escape** | Closes the window. |
 
+Clicking the strip opens the system colour picker, with the colours you've
+already used kept under **Custom** — so a shade you mixed once is one click away
+the next time.
+
+<p align="center">
+  <img src="share/screenshot-picker.png" width="380"
+       alt="The system colour dialog open over the app, showing the standard palette and a row of previously used custom colours.">
+</p>
+
 If a hotkey or an Fn key changes something while the window is open, the window
 follows along rather than going stale.
 
