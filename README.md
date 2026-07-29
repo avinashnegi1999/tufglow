@@ -160,8 +160,9 @@ kbdrgb-cycle next             # step the effect forward
 
 No password prompt: it hands off to the same `kbdrgb-write` helper the GUI uses
 rather than writing sysfs itself, so there's one copy of the validation and one
-`save=0`/`save=1` pair. It also updates the state file, so a change made from the
-CLI shows up correctly in the GUI and the hotkeys instead of leaving them stale.
+place that decides when to persist. It also updates the state file, so a change
+made from the CLI shows up correctly in the GUI and the hotkeys instead of
+leaving them stale.
 
 ## How it talks to the hardware
 
@@ -183,8 +184,21 @@ Root-only and **write-only**. Two consequences run through everything else:
   `~/.local/state/kbdrgb/state` is the only record of what's set, in a 5-field
   `mode speed r g b` format shared between the GUI and `kbdrgb-cycle`.
 
-Each write goes twice, `save=0` then `save=1`, so the setting both applies
-instantly and survives a reboot.
+Each write carries a leading command field. `save=0` applies the setting
+immediately and is volatile; `save=1` writes it to the keyboard controller's
+non-volatile store so it survives a reboot.
+
+**`save=1` has to be rate-limited, and that is not optional.** Sending one per
+colour change — which is what a preset click or a hotkey press produces — hangs
+the EC firmware and hard-locks the whole machine: no panic, no shutdown, the
+kernel log simply stops mid-line. It took this laptop down twice and left the
+NTFS partition it was being developed on damaged. `kbdrgb-write` therefore takes
+`flock` first, always issues `save=0`, and issues `save=1` only when the value
+actually changed and at most once every 10 seconds, tracked in
+`/run/kbdrgb.persisted`. Colours still apply instantly. The GUI passes `--save`
+on close to force the write, so what is on screen when you quit is what comes
+back after a reboot. `tools/test-persist-ratelimit` replays the exact burst from
+those crash logs and fails if any of it reaches the controller.
 
 **Brightness — a normal LED attribute**
 
@@ -240,7 +254,7 @@ hardware — a redundant write, not a wrong one.
 | A password prompt appears when changing colour | Same cause — `/etc/sudoers.d/kbdrgb` is missing or not `0440 root:root`. Re-run `./install.sh`. |
 | Hotkeys do nothing | Not a GNOME session, or the bindings didn't apply. Check: `gsettings get org.gnome.settings-daemon.plugins.media-keys custom-keybindings` — it should list two `kbdrgb-*` paths. |
 | Brightness slider does nothing | Not in an active seat session. Verify with `loginctl` that your session is `active`. |
-| Effect resets after reboot | Expected for the *effect*; the colour persists via `save=1`. The state file restores the rest on next launch. |
+| Effect resets after reboot | Expected for the *effect*; the colour persists via `save=1` on close. The state file restores the rest on next launch. |
 | Launcher missing from the app grid | `update-desktop-database ~/.local/share/applications`, then log out and back in. |
 | Desktop shortcut opens a text editor instead of running | GNOME doesn't trust it. `gio set ~/Desktop/kbdrgb.desktop metadata::trusted true`, or just re-run `./install.sh --shortcut`. |
 | Nothing opens at the end of the install | No `$DISPLAY`/`$WAYLAND_DISPLAY` — an SSH or headless run says so and skips launching rather than failing. |
